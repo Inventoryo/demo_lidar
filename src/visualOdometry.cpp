@@ -80,6 +80,14 @@ const int showDSRate = 2;
 void accumulateRotation(double cx, double cy, double cz, double lx, double ly, double lz, 
                         double &ox, double &oy, double &oz)
 {
+  /*R_wl=[ccy 0 scy;0 1 0;-scy 0 ccy]*[1 0 0;0 ccx -scx;0 scx ccx]*[ccz -scz 0;scz ccz 0;0 0 1];（表示以world为参考坐标系）
+   *R_cl=[clz -slz 0;slz clz 0;0 0 1]*[1 0 0;0 clx -slx;0 slx clx]*[cly 0 sly;0 1 0;-sly 0 cly];（表示以current为参考坐标系）
+   *R_wc=R_wl*(R_cl).';
+   *最后求出来(-sin(rx))=cos(cx)*cos(cz)*sin(lx) - cos(lx)*cos(ly)*sin(cx) - cos(cx)*cos(lx)*sin(cz)*sin(ly)
+   *而程序中是(-sin(rx))= cos(lx)*cos(cx)*sin(ly)*sin(cz) - cos(cx)*cos(cz)*sin(lx) - cos(lx)*cos(ly)*sin(cx);（程序里的srx=(-sin(rx))）
+   *可以发现两个公式之间差了lx,ly,lz的负号，所以accumulateRotation()函数传入的是transform[0]~[2]的负值
+   *至于为什么-sinx等于上式，可以通过看R_wl，发现第二行第三列的元素为-sinx，因此两个旋转矩阵相乘后，对应位置上的元素就对应着新的pitch角的sin 值
+  */
   double srx = cos(lx)*cos(cx)*sin(ly)*sin(cz) - cos(cx)*cos(cz)*sin(lx) - cos(lx)*cos(ly)*sin(cx);
   ox = -asin(srx);
 
@@ -126,8 +134,10 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
   imuPitchLast = imuPitchCur;
   imuYawLast = imuYawCur;
 
+  //transform用于记录帧与帧之间的转移矩阵，transformSum记录当前帧与初始帧的转移矩阵,
   double transform[6] = {0};
   if (imuPointerLast >= 0) {
+    //将该帧图像到来之前的所有IMU信息提取出来
     while (imuPointerFront != imuPointerLast) {
       if (imagePointsCurTime < imuTime[imuPointerFront]) {
         break;
@@ -146,6 +156,7 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
       double ratioBack = (imuTime[imuPointerFront] - imagePointsCurTime) 
                        / (imuTime[imuPointerFront] - imuTime[imuPointerBack]);
 
+      //通过插值得到img时刻的roll,pitch,yaw值
       imuRollCur = imuRoll[imuPointerFront] * ratioFront + imuRoll[imuPointerBack] * ratioBack;
       imuPitchCur = imuPitch[imuPointerFront] * ratioFront + imuPitch[imuPointerBack] * ratioBack;
       if (imuYaw[imuPointerFront] - imuYaw[imuPointerBack] > PI) {
@@ -191,8 +202,11 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
   pcl::PointXYZHSV ipr;
   ipRelations->clear();
   ipInd.clear();
+
+  //这里是以imagePointsLast为基准进行查找，有些imagePointsCur中的点不会被查询到
   for (int i = 0; i < imagePointsLastNum; i++) {
     bool ipFound = false;
+    //查找是否有匹配到的特征点
     for (; j < imagePointsCurNum; j++) {
       if (imagePointsCur->points[j].ind == imagePointsLast->points[i].ind) {
         ipFound = true;
@@ -202,6 +216,7 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
       }
     }
 
+    //如果发现匹配的特征点，尝试获取深度信息
     if (ipFound) {
       ipr.x = imagePointsLast->points[i].u;
       ipr.y = imagePointsLast->points[i].v;
@@ -237,6 +252,8 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
           double z3 = depthPoint.intensity;
           minDepth = (z3 < minDepth)? z3 : minDepth;
           maxDepth = (z3 > maxDepth)? z3 : maxDepth;
+          //目前只知道该特征点在相机坐标系下的归一化坐标[u,v]（即[X/Z,Y/Z,1]），
+          //通过计算ipr.s获得对应于该特征点的深度值,即系数Z，则Z*u和Z*v就可获得该特征点在相机坐标系下实际的X,Y,Z坐标
 
           double u = ipr.x;
           double v = ipr.y;
@@ -263,11 +280,13 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
         ipr.v = 0;
       }
 
+      //如果无法从点云获取深度信息，三角测量？
       if (fabs(ipr.v) < 0.5) {
         double disX = transformSum[3] - startTransLast->points[i].h;
         double disY = transformSum[4] - startTransLast->points[i].s;
         double disZ = transformSum[5] - startTransLast->points[i].v;
 
+        //若移动距离大于1m
         if (sqrt(disX * disX + disY * disY + disZ * disZ) > 1) {
 
           double u0 = startPointsLast->points[i].u;
@@ -346,8 +365,19 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
           }
         }
 
+        //每一个匹配上的特征点对都会被打上一个ipr.v标签，ipr.v＝０代表未从点云获得深度，ipr.v＝１
+        //代表从点云获得深度，ipr.v＝２代表此时可以通过三角测量获得该特征点的深度值。
+        /*
+         *ipDepthLast)[i]存储的是第i个特征点的三角测量值，若该特征点从未被三角测量过，
+         *ipDepthLast)[i]＝－１；若该特征点在一段时间内能一直被观测到，且没有从点云中获得
+         *深度信息，则不断通过三角测量的融合收敛该特征点的深度值；若在这个过程中某几帧中能从
+         *点云获得该特征点的深度，则使用点云的深度信息，三角测量的结果仍通过计算出的转移矩阵
+         *进行维护，仍然存储在*ipDepthLast)[i]中，一旦无法从点云获得深度，则仍使用
+         *ipDepthLast)[i]中保存的三角测量进行融合
+        */
         if (ipr.v == 2) {
           if ((*ipDepthLast)[i] > 0) {
+            //这一步进行的是多次三角测量的融合,低通滤波
             ipr.s = 3 * ipr.s * (*ipDepthLast)[i] / (ipr.s + 2 * (*ipDepthLast)[i]);
           }
           (*ipDepthLast)[i] = ipr.s;
@@ -362,6 +392,7 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
     }
   }
 
+  //迭代收敛获得两帧图像间的转移矩阵
   int iterNum = 100;
   pcl::PointXYZHSV ipr2, ipr3, ipr4;
   int ipRelationsNum = ipRelations->points.size();
@@ -394,6 +425,19 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
       double tz = transform[5];
 
       if (fabs(ipr.v) < 0.5) {
+        /*
+         * 这里R矩阵使用欧拉角roll,pitch yaw来表示的，下面六个公式是论文公式（6）在对roll,pitch,yaw和tx,ty,tz求偏导
+         *transform[0]存储的是绕x轴旋转的角度，transform[1]存绕y轴角度，transform[2]存绕z轴角度
+         *这里计算的R、T矩阵是k-1时刻旋转到k时刻的R、T矩阵，注意这个主次关系,参考坐标系是current,即k时刻坐标系
+         *从k-1旋转到k的顺序是：z轴->x轴->y轴，注意顺序
+         *R_cl=[crz -srz 0;srz crz 0;0 0 1]*[1 0 0;0 crx -srx;0 srx crx]*[cry 0 sry;0 1 0;-sry 0 cry];
+        *//*
+         * 这里R矩阵使用欧拉角roll,pitch yaw来表示的，下面六个公式是论文公式（6）在对roll,pitch,yaw和tx,ty,tz求偏导
+         *transform[0]存储的是绕x轴旋转的角度，transform[1]存绕y轴角度，transform[2]存绕z轴角度
+         *这里计算的R、T矩阵是k-1时刻旋转到k时刻的R、T矩阵，注意这个主次关系,参考坐标系是current,即k时刻坐标系
+         *从k-1旋转到k的顺序是：z轴->x轴->y轴，注意顺序
+         *R_cl=[crz -srz 0;srz crz 0;0 0 1]*[1 0 0;0 crx -srx;0 srx crx]*[cry 0 sry;0 1 0;-sry 0 cry];
+        */
 
         ipr2.x = v0*(crz*srx*(tx - tz*u1) - crx*(ty*u1 - tx*v1) + srz*srx*(ty - tz*v1)) 
                - u0*(sry*srx*(ty*u1 - tx*v1) + crz*sry*crx*(tx - tz*u1) + sry*srz*crx*(ty - tz*v1)) 
@@ -416,6 +460,7 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
         ipr2.v = u1*(sry*srz - cry*crz*srx) - v1*(crz*sry + cry*srx*srz) + u0*(u1*(cry*srz + crz*srx*sry) 
                - v1*(cry*crz - srx*sry*srz)) + v0*(crx*crz*u1 + crx*srz*v1);
 
+        //将六个变量值代入论文（公式6）计算得到残差值
         double y2 = (ty - tz*v1)*(crz*sry + cry*srx*srz) - (tx - tz*u1)*(sry*srz - cry*crz*srx) 
                   - v0*(srx*(ty*u1 - tx*v1) + crx*crz*(tx - tz*u1) + crx*srz*(ty - tz*v1)) 
                   + u0*((ty - tz*v1)*(cry*crz - srx*sry*srz) - (tx - tz*u1)*(cry*srz + crz*srx*sry) 
@@ -489,6 +534,7 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
         }
       }
     }
+    //加 0.01 是为了防止 ptNumWithDepth 为 0
     meanValueWithDepth /= (ptNumWithDepth + 0.01);
     ptNumNoDepthRec = ptNumNoDepth;
     ptNumWithDepthRec = ptNumWithDepth;
@@ -517,6 +563,7 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
       cv::transpose(matA, matAt);
       matAtA = matAt * matA;
       matAtB = matAt * matB;
+      //根据《14讲》式（6.21），这里用的是高斯牛顿法而不是LM算法
       cv::solve(matAtA, matAtB, matX, cv::DECOMP_QR);
 
       //if (fabs(matX.at<float>(0, 0)) < 0.1 && fabs(matX.at<float>(1, 0)) < 0.1 && 
@@ -552,6 +599,7 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
     imuInited = true;
   }
 
+  //rx,ry,rz表示当前帧与初始帧的pitch,yaw，roll角度
   double rx, ry, rz;
   accumulateRotation(transformSum[0], transformSum[1], transformSum[2], 
                     -transform[0], -transform[1], -transform[2], rx, ry, rz);
@@ -582,10 +630,13 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
   double y2 = cos(rx) * y1 - sin(rx) * z1;
   double z2 = sin(rx) * y1 + cos(rx) * z1;
 
+  //当前帧与上一帧的位移量通过rx,ry,rz的旋转，计算当前帧和初始帧的位移增量，叠加到transformSum[]中
+  //该增量计算得到的是last帧相对于current帧在世界坐标系下的位移,所以current相对于Last在世界坐标系下的位移为负值,所以是减去
   double tx = transformSum[3] - (cos(ry) * x2 + sin(ry) * z2);
   double ty = transformSum[4] - y2;
   double tz = transformSum[5] - (-sin(ry) * x2 + cos(ry) * z2);
 
+  //当前帧与初始帧的转移矩阵保存在transformSum中,transformSum中存的是将当前帧旋转到起始帧的旋转矩阵
   transformSum[0] = rx;
   transformSum[1] = ry;
   transformSum[2] = rz;
@@ -607,6 +658,7 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
   double sry = sin(transform[1]);
 
   j = 0;
+  //这里是以imagePointsCur为基准进行查找，会遍历imagePointsCur中的每一个点
   for (int i = 0; i < imagePointsCurNum; i++) {
     bool ipFound = false;
     for (; j < imagePointsLastNum; j++) {
@@ -619,10 +671,24 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
     }
 
     if (ipFound) {
+      /*
+       *如果在连续的多帧特征图像之间，imagePointsCur中的某个特征点能够与上一帧
+       *imagePointsLast匹配到，代表该特征点能够被连续观测到，则将该特征点第一次出现在这些连续帧
+       *的坐标以及该坐标相对于初始帧的转移矩阵保存在startPointsCur中，用作三角测量时的第一帧
+       *特征点；若该特征点一旦与前一帧匹配失败，就表示该特征点为一系列特征点帧中的一个新出现的
+       *特征点，则将该特征点当前的坐标与转移矩阵保存在startPointsCur，认为它第一次出现，并在后续帧中
+       *若能一直观测到该特征点，startPointsCur中仍保存第一次出现的坐标与转移矩阵
+      */
       startPointsCur->push_back(startPointsLast->points[j]);
       startTransCur->push_back(startTransLast->points[j]);
 
       if ((*ipDepthLast)[j] > 0) {
+        /*
+         *transform[]里存的就是T_cl,所以将Last坐标系的点按照zxy(从右往左看)的顺序旋转,再加上位移就变换到了current坐标系
+         *而R_lc就是把transform[0]~transform[2]的pitch,yaw,roll角取负值然后按照yxz(从右往左看)的顺序变换就可得到
+         *这里有一点注意的是,将transform[0]~[2]按照yxz相乘得到的R_lc和直接将R_cl取转置得到的R_lc差了三个角度的负值
+         *所以通过旋转相乘得到R_lc时transform[0]~[2]要先取负值
+        */
         double ipz = (*ipDepthLast)[j];
         double ipx = imagePointsLast->points[j].u * ipz;
         double ipy = imagePointsLast->points[j].v * ipz;
@@ -652,6 +718,13 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
   angleSum[0] -= transform[0];
   angleSum[1] -= transform[1];
   angleSum[2] -= transform[2];
+
+  /* rz,rx,ry分别对应着标准右手坐标系中的roll,pitch,yaw角,通过查看createQuaternionMsgFromRollPitchYaw()的函数定义可以发现.
+   * 当pitch和yaw角给负值后,四元数中的y和z会变成负值,x和w不受影响.由四元数定义可以知道,x,y,z是指旋转轴在三个轴上的投影,w影响
+   * 旋转角度,所以由createQuaternionMsgFromRollPitchYaw()计算得到四元数后,其在一般右手坐标系中的x,y,z分量对应到该应用场景下
+   * 的坐标系中,geoQuat.x对应实际坐标系下的z轴分量,geoQuat.y对应x轴分量,geoQuat.z对应实际的y轴分量,而由于rx和ry在计算四元数
+   * 时给的是负值,所以geoQuat.y和geoQuat.z取负值,这样就等于没变
+  */
 
   geometry_msgs::Quaternion geoQuat = tf::createQuaternionMsgFromRollPitchYaw(rz, -rx, -ry);
 
@@ -710,6 +783,9 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
 
       ipd.u = ipRelations->points[i].z;
       ipd.v = ipRelations->points[i].h;
+      //这一步是对标号为ind的特征点深度进行的一个粗略估计,后面如果该特征点可以直接从点云或者三角测量获得深度值,
+      //则这个估计值失效,如果后面不能得到该特征深度值,则仍使用该估计值
+
       ipd.depth = ipRelations->points[i].s + transform[5];
       ipd.label = ipRelations->points[i].v;
       ipd.ind = ipInd[i];
@@ -729,6 +805,7 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
       ipd.v = ipRelations->points[i].y;
       ipd.depth = ipRelations->points[i].s;
 
+      //现在有Last帧和Cur帧，depthPointsSend中存储的是对Last帧中特征点深度的估计和确切计算到的深度
       depthPointsSend->push_back(ipd);
 
       ipp.x = ipRelations->points[i].x * ipRelations->points[i].s;
@@ -760,6 +837,7 @@ void depthCloudHandler(const sensor_msgs::PointCloud2ConstPtr& depthCloud2)
   pcl::fromROSMsg(*depthCloud2, *depthCloud);
   depthCloudNum = depthCloud->points.size();
 
+  //将整个点云投影到焦距为单位距离=10的平面上
   if (depthCloudNum > 10) {
     for (int i = 0; i < depthCloudNum; i++) {
       depthCloud->points[i].intensity = depthCloud->points[i].z;
@@ -794,6 +872,8 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
   int ipRelationsNum = ipRelations->points.size();
   for (int i = 0; i < ipRelationsNum; i++) {
     if (fabs(ipRelations->points[i].v) < 0.5) {
+      //这里运用《14讲》公式5.5将归一化坐标平面上的点变换到图像平面，这里的相减是因为在featureTrack部分将图像坐标
+      //变到归一化图像平面时加了个负号,又考虑到显示的图像是缩小一倍后的，所以要再除以showDSRate
       cv::circle(bridge->image, cv::Point((kImage[2] - ipRelations->points[i].z * kImage[0]) / showDSRate,
                 (kImage[5] - ipRelations->points[i].h * kImage[4]) / showDSRate), 1, CV_RGB(255, 0, 0), 2);
     } else if (fabs(ipRelations->points[i].v - 1) < 0.5) {

@@ -38,6 +38,12 @@ double transformAftBA[6] = {0};
 void diffRotation(double cx, double cy, double cz, double lx, double ly, double lz, 
                   double &ox, double &oy, double &oz)
 {
+  /*
+ 45      *计算相邻两帧的旋转角
+ 46      *R_wc=[ccy 0 scy;0 1 0;-scy 0 ccy]*[1 0 0;0 ccx -scx;0 scx ccx]*[ccz -scz 0;scz ccz 0;0 0 1];
+ 47      *R_wl=[cly 0 sly;0 1 0;-sly 0 cly]*[1 0 0;0 clx -slx;0 slx clx]*[clz -slz 0;slz clz 0;0 0 1];
+ 48      *R_lc=(R_wl).'*R_wc;
+ 49     */
   double srx = cos(cx)*cos(cy)*(sin(ly)*sin(lz) + cos(ly)*cos(lz)*sin(lx)) 
              - cos(cx)*sin(cy)*(cos(ly)*sin(lz) - cos(lz)*sin(lx)*sin(ly)) - cos(lx)*cos(lz)*sin(cx);
   ox = -asin(srx);
@@ -56,12 +62,22 @@ void diffRotation(double cx, double cy, double cz, double lx, double ly, double 
   oz = atan2(srzcrx / cos(ox), crzcrx / cos(ox));
 }
 
+/*
+ *该函数将新的特征点序列从VO线转换到BA线，其坐标转换关系参考sketch文件夹下的“3.png”
+ *R_w_bc=[cbcy 0 sbcy;0 1 0;-sbcy 0 cbcy]*[1 0 0;0 cbcx -sbcx;0 sbcx cbcx]*[cbcz -sbcz 0;sbcz cbcz 0;0 0 1];
+ *R_w_bl=[cbly 0 sbly;0 1 0;-sbly 0 cbly]*[1 0 0;0 cblx -sblx;0 sblx cblx]*[cblz -sblz 0;sblz cblz 0;0 0 1];
+ *R_w_al=[caly 0 saly;0 1 0;-saly 0 caly]*[1 0 0;0 calx -salx;0 salx calx]*[calz -salz 0;salz calz 0;0 0 1];
+ *R_bl_al= (R_w_bl).' * R_w_al;
+ *R_w_tb= R_w_bc * R_bl_al;
+ *R_w_tb就是将新特征序列首帧变到BA线后的旋转矩阵
+*/
 void transformAssociateToBA()
 {
   double txDiff = txRec - transformBefBA[3];
   double tyDiff = tyRec - transformBefBA[4];
   double tzDiff = tzRec - transformBefBA[5];
 
+  //注意这里是将参考坐标系旋转到目标坐标系，所以roll,pitch,yaw都应该加一个负号
   double x1 = cos(yawRec) * txDiff - sin(yawRec) * tzDiff;
   double y1 = tyDiff;
   double z1 = sin(yawRec) * txDiff + cos(yawRec) * tzDiff;
@@ -247,6 +263,12 @@ int main(int argc, char** argv)
 
       transformAssociateToBA();
 
+      /*
+       *这里有个坐标系的对应关系，在Pose3d()函数中的x,y,z轴分别对应着实际坐标系的z,x,y轴，
+       *所以Pose3d()中的x,y,z值分别为tzRec，txRec，tyRec，而roll,pitch,yaw是根据实际机体
+       *的旋转关系定义的，所以yawRec, pitchRec, rollRec就对应Pose3d()中传入值的roll,pitch,yaw
+      */
+
       Pose3d_Factor* poseFactors0 = new Pose3d_Factor(pose0, 
                                     Pose3d(tzRec, txRec, tyRec, yawRec, pitchRec, rollRec), noise2);
       ba.add_factor(poseFactors0);
@@ -287,6 +309,7 @@ int main(int argc, char** argv)
         tyDiff = -sin(rollRec) * x2 + cos(rollRec) * y2;
         tzDiff = z2;
 
+        //rollDiff, pitchDiff, yawDiff存储的是后一帧到前一帧的旋转角度，参考系是前一帧
         double rollDiff, pitchDiff, yawDiff;
         diffRotation(pitch, yaw, roll, pitchRec, yawRec, rollRec, pitchDiff, yawDiff, rollDiff);
 

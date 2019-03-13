@@ -32,6 +32,7 @@ double lastPubTime = 0;
 
 void depthPointsHandler(const sensor_msgs::PointCloud2ConstPtr& depthPoints2)
 {
+  //每隔五帧保留一帧
   frameCount = (frameCount + 1) % 5;
   if (frameCount != 0) {
     return;
