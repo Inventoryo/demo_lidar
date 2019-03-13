@@ -3,6 +3,18 @@
 #include <stdlib.h>
 #include <ros/ros.h>
 
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl_ros/point_cloud.h>
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl/range_image/range_image.h>
+#include <pcl/filters/filter.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/kdtree/kdtree_flann.h>
+#include <pcl/common/common.h>
+#include <pcl/registration/icp.h>
+#include <pcl/common/transforms.h>
+
 #include "pointDefinition.h"
 
 const double PI = 3.1415926;
